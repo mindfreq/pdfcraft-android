@@ -1,5 +1,4 @@
-//! Arabic, Hebrew and Thai text shaping with the matching craft-fonts face, Latin, Greek and
-//! Cyrillic beyond WinAnsiEncoding with the bundled Inter, and bounded glyph outlines.
+//! Arabic, Hebrew and Thai text shaping with the matching craft-fonts face and bounded glyph outlines.
 
 use std::sync::OnceLock;
 
@@ -29,9 +28,10 @@ pub enum ShapedScript {
     Arabic,
     Hebrew,
     Thai,
-    /// Latin, Greek and Cyrillic in the bundled Inter ([`crate::document_latin_fonts`]), for text the
-    /// standard fonts can't draw.
-    Inter,
+    /// Latin, Greek and Cyrillic letters in the bundled Inter face
+    /// ([`crate::document_latin_fonts`]), which every build has: for the ones WinAnsiEncoding
+    /// lacks, beside the standard font that draws the rest.
+    Latin,
 }
 
 impl ShapedScript {
@@ -40,7 +40,7 @@ impl ShapedScript {
             Self::Arabic => crate::document_arabic_font(),
             Self::Hebrew => crate::document_hebrew_font(false),
             Self::Thai => crate::document_thai_font(),
-            Self::Inter => crate::document_latin_fonts(false).into_iter().next(),
+            Self::Latin => crate::document_latin_fonts(false).into_iter().next(),
         }
     }
 }
@@ -49,12 +49,12 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
     static FACE: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static HEBREW: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static THAI: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
-    static INTER: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
+    static LATIN: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     let cache = match script {
         ShapedScript::Arabic => &FACE,
         ShapedScript::Hebrew => &HEBREW,
         ShapedScript::Thai => &THAI,
-        ShapedScript::Inter => &INTER,
+        ShapedScript::Latin => &LATIN,
     };
     cache
         .get_or_init(|| {
@@ -98,10 +98,36 @@ pub fn shape_thai(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
     shape_script(text, false, ShapedScript::Thai)
 }
 
-/// Shape one directional run of Latin, Greek or Cyrillic text with Inter, clusters in drawing
-/// order. [`GlyphError::Missing`] when Inter lacks a character.
-pub fn shape_inter(text: &str, rtl: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
-    shape_script(text, rtl, ShapedScript::Inter)
+/// Whether the bundled Inter face has a glyph for `c`.
+pub fn latin_has(c: char) -> bool {
+    face(ShapedScript::Latin).is_some_and(|(font, _)| font.charmap().map(c).is_some_and(|g| g.to_u32() != 0))
+}
+
+/// Shape a left-to-right run of Latin, Greek or Cyrillic `text` with the bundled Inter face,
+/// accents and other marks kept with their letter. [`GlyphError::Missing`] when the face lacks a
+/// character.
+pub fn shape_latin(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
+    shape_script(text, false, ShapedScript::Latin)
+}
+
+/// The scripts the bundled face's runs are shaped as.
+#[derive(Clone, Copy, PartialEq)]
+enum LatinRun {
+    Latin,
+    Greek,
+    Cyrillic,
+}
+
+/// The script of a run for the bundled face: that of its first Greek or Cyrillic letter, else
+/// Latin.
+fn latin_run(text: &str) -> LatinRun {
+    text.chars()
+        .find_map(|c| match u32::from(c) {
+            0x0370..=0x03FF | 0x1F00..=0x1FFF => Some(LatinRun::Greek),
+            0x0400..=0x052F | 0x1C80..=0x1C8F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F => Some(LatinRun::Cyrillic),
+            _ => None,
+        })
+        .unwrap_or(LatinRun::Latin)
 }
 
 fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedCluster>, GlyphError> {
@@ -111,18 +137,20 @@ fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedC
     let mut buffer = UnicodeBuffer::new();
     buffer.push_str(text);
     buffer.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
-    match kind {
-        ShapedScript::Arabic => buffer.set_script(script::ARABIC),
-        ShapedScript::Hebrew => buffer.set_script(script::HEBREW),
-        ShapedScript::Thai => buffer.set_script(script::THAI),
-        // Latin, Greek or Cyrillic, from the text itself.
-        ShapedScript::Inter => buffer.guess_segment_properties(),
-    }
-    // Preserve the historical Arabic per-character mapping (Inter's text gets the same); Hebrew and
-    // Thai marks stay with their base.
+    buffer.set_script(match kind {
+        ShapedScript::Arabic => script::ARABIC,
+        ShapedScript::Hebrew => script::HEBREW,
+        ShapedScript::Thai => script::THAI,
+        ShapedScript::Latin => match latin_run(text) {
+            LatinRun::Greek => script::GREEK,
+            LatinRun::Cyrillic => script::CYRILLIC,
+            LatinRun::Latin => script::LATIN,
+        },
+    });
+    // Preserve the historical Arabic per-character mapping; Hebrew, Thai and Latin marks stay with their base.
     buffer.set_cluster_level(match kind {
-        ShapedScript::Arabic | ShapedScript::Inter => BufferClusterLevel::Characters,
-        ShapedScript::Hebrew | ShapedScript::Thai => BufferClusterLevel::MonotoneGraphemes,
+        ShapedScript::Arabic => BufferClusterLevel::Characters,
+        ShapedScript::Hebrew | ShapedScript::Thai | ShapedScript::Latin => BufferClusterLevel::MonotoneGraphemes,
     });
     let shaped = shaper.shape(buffer, ShapeOptions::new());
     // Clusters are byte offsets into `text`; a cluster shows the characters up to the next one.
@@ -163,6 +191,16 @@ pub fn arabic_glyph(id: u32) -> Result<GlyphOutline, GlyphError> {
 /// A bounded outline from the same face that produced the shaped glyph id.
 pub fn shaped_glyph(script: ShapedScript, id: u32) -> Result<GlyphOutline, GlyphError> {
     let (font, _) = face(script).ok_or(GlyphError::NoFont)?;
+    glyph(font, id)
+}
+
+/// Glyph `id` of the face in `bytes`, bounded like [`shaped_glyph`]: for text shaped with
+/// [`crate::source_shaping::shape`] in a face no [`ShapedScript`] names.
+pub fn face_glyph(bytes: &[u8], id: u32) -> Result<GlyphOutline, GlyphError> {
+    glyph(&FontRef::new(bytes).map_err(|_| GlyphError::NoFont)?, id)
+}
+
+fn glyph(font: &FontRef, id: u32) -> Result<GlyphOutline, GlyphError> {
     if font.maxp().map_or(true, |m| id >= u32::from(m.num_glyphs())) {
         return Err(GlyphError::Missing);
     }

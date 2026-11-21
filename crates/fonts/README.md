@@ -18,14 +18,6 @@ Today it holds what generated appearances need without a font program:
   value or a comment's text, which is stored as typed, draw the `?` and mark the annotation with
   `set_undrawn_mark` (`UNDRAWN_MARK`, read back by `undrawn_mark`) so the edit is reported and
   flattening refuses. `script_missing` names what the typed-signature script font and its Inter fallback both lack.
-- Inter (`INTER_REGULAR`, bundled in every build) stands in for text WinAnsiEncoding can't hold
-  but Inter can (Turkish ş, Polish ł, Czech ř, Romanian ț, Greek, Cyrillic, …): `needs_inter` says
-  when, and `first_undrawable_inter` is `first_undrawable` for paths that do so. Generated
-  appearances (text boxes, Fill & Sign text, form fields) draw it as Inter's outlines
-  (`inter_path`, measured with `inter_width`), so they need no font resource; page content gets
-  Type 3 fonts drawn from the same face (`INTER` as a `CraftFont` for the editor's fallback, and
-  `ShapedScript::Inter` / `shape_inter` for added text). Text Inter lacks too keeps the behaviour
-  above.
 
 It also holds the fonts of the optional [craft-fonts](https://github.com/storytold/craft-fonts)
 build input. `build.rs` embeds them as `CRAFT_FONTS` when the build sets
@@ -64,10 +56,18 @@ set). Without that variable `CRAFT_FONTS` is empty and everything below copes:
   editor can use the first one that has all of the replacement's glyphs (the faces differ in
   coverage, e.g. of Cyrillic).
 - `ui_thai_fonts` / `document_thai_font` / `shape_thai`: the `Thai` faces for the interface
-  and shaped Thai Add Text content. Harfrust positions stacked vowel/tone marks and decomposes
+  and shaped Thai content. Harfrust positions stacked vowel/tone marks and decomposes
   Sara Am; cluster ToUnicode entries preserve the original text. The shared Type 3 writer
-  embeds outlines, so reopening does not depend on installed fonts.
+  (`shaped_text`) embeds outlines, so reopening does not depend on installed fonts: Add text,
+  text boxes, Fill & Sign text, form fields, headers, footers and watermarks all write with it
+  (`shaped_text::appearance_lines` for appearances, whose glyph streams `store_streams` moves into
+  the document). `wrap_with` never breaks a line before a Thai mark.
+- `craft_glyph(face, ch)` and `face_has(bytes, ch)`: bounded outlines and glyph coverage for any bundled face.
 - `SHIPPORI_MINCHO`: Shippori Mincho's bytes, or `None`.
+- `TextPlan::for_words`: how the OCR output writes text beyond WinAnsi — per word the first
+  face (document face first) whose glyphs cover it, planned once per page into Type 3 fonts
+  (codes, advances, `?` stand-ins) that `pdfcraft-edit` registers and the `pdfcraft-ocr` layers
+  draw with; characters no face has are counted (`missing`) so the output reports them.
 
 Generated Japanese Type 3 fonts record the fallback face's family and style in an indirect
 `FontDescriptor`. `pdf::Metrics::base_font` uses its `FontName` when the Type 3 dictionary has
@@ -89,3 +89,11 @@ Document font inputs use `embedding`: bounded static TrueType/OpenType-CFF valid
 exact program preservation, Unicode/CID/GID mapping and full-face subset completion.
 `shaping` uses the same program with harfrust and UAX #9; source UI fallback fonts are
 never exported. See [existing-text editing](../../docs/editing-existing-text.md).
+
+`pdf::embedded_sfnt_within` reconstructs a missing Unicode cmap for Identity-H TrueType
+subsets from the PDF's ToUnicode and CID-to-glyph maps, and completes a THSarabunPSK subset's
+Latin-only one with them. Only the in-memory editor copy changes;
+the PDF's font program stays intact. `pdf::LegacyThaiFont` shapes verified THSarabunPSK
+positional glyphs into their original PDF codes, retaining the source face and weight. Missing
+contextual glyphs are refused. `pdf::recovered_thai_map` recognizes narrowly fingerprinted
+damaged exporter maps; callers must record repairs and apply them to page-owned font copies.

@@ -22,6 +22,8 @@ pub use zip::Zip;
 
 mod as_docx;
 mod as_html;
+mod clip;
+pub use clip::{ClipBuilder, ClipSpan, ClipStyle, ClipText, MAX_CLIP_HTML_BYTES, MAX_CLIP_SPANS, MAX_CLIP_TEXT_BYTES, clip_html, font_family};
 mod as_markdown;
 mod as_rtf;
 mod layout;

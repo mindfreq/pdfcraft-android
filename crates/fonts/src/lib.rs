@@ -14,24 +14,29 @@ pub mod embedding;
 mod encodings;
 pub mod fallback;
 pub mod pdf;
+pub mod plan;
 mod script;
+pub mod shaped_text;
 mod shaping;
 pub mod source_shaping;
 mod std14;
 mod std14_metrics;
+mod wire;
 pub use craft::{
     CRAFT_FONTS, CraftFont, SHIPPORI_MINCHO, document_arabic_font, document_devanagari_font, document_hebrew_font, document_japanese_font,
     document_japanese_font_for_style, document_japanese_fonts_for_style, document_latin_fonts, document_thai_font, ui_arabic_fonts, ui_chinese_fonts,
     ui_cjk_fonts, ui_devanagari_fonts, ui_hebrew_fonts, ui_japanese_fonts, ui_telugu_fonts, ui_thai_fonts,
 };
+pub use plan::{MAX_PLAN_GLYPHS, MAX_TYPE3_GLYPHS, PlannedType3, TextPlan};
 pub use script::{
-    GlyphError, GlyphOutline, INTER_REGULAR, MAX_SIGNATURE_CHARS, ScriptOutline, inter_has, inter_path, japanese_glyph, japanese_glyph_from,
+    GlyphError, GlyphOutline, INTER_REGULAR, MAX_SIGNATURE_CHARS, ScriptOutline, craft_glyph, face_has, japanese_glyph, japanese_glyph_from,
     script_missing, script_outline,
 };
 pub use shaping::{
-    ShapedCluster, ShapedScript, arabic_glyph, arabic_has, hebrew_has, shape_arabic, shape_hebrew, shape_inter, shape_thai, shaped_glyph, thai_has,
+    ShapedCluster, ShapedScript, arabic_glyph, arabic_has, face_glyph, hebrew_has, latin_has, shape_arabic, shape_hebrew, shape_latin, shape_thai,
+    shaped_glyph, thai_has,
 };
-pub use std14::Std14;
+pub use std14::{Match as Std14Match, Std14};
 
 /// Advance of `s` in Helvetica at `size` points, using the exact standard-14 metrics.
 ///
@@ -54,8 +59,7 @@ pub fn cjk_width(s: &str, size: f64) -> f64 {
         .sum()
 }
 
-/// Approximate advance of `s` in Inter Regular at `size` points. A tab counts as a space, as
-/// [`inter_path`] draws it.
+/// Approximate advance of `s` in Inter Regular at `size` points.
 pub fn inter_width(s: &str, size: f64) -> f64 {
     use skrifa::MetadataProvider as _;
     let Ok(font) = skrifa::FontRef::new(INTER_REGULAR) else { return helvetica_width(s, size) };
@@ -64,10 +68,7 @@ pub fn inter_width(s: &str, size: f64) -> f64 {
     let scale = size / upem;
     let charmap = font.charmap();
     let advances = font.glyph_metrics(skrifa::instance::Size::unscaled(), loc);
-    s.chars()
-        .map(|c| if c == '\t' { ' ' } else { c })
-        .map(|c| charmap.map(c).and_then(|gid| advances.advance_width(gid)).unwrap_or(0.0) as f64 * scale)
-        .sum()
+    s.chars().map(|c| charmap.map(c).and_then(|gid| advances.advance_width(gid)).unwrap_or(0.0) as f64 * scale).sum()
 }
 
 /// East Asian wide and full-width characters (Unicode UAX #11 W and F, by block).
@@ -101,7 +102,6 @@ pub fn wrap(text: &str, size: f64, width: f64) -> Vec<String> {
 pub fn wrap_with(text: &str, size: f64, width: f64, measure: impl Fn(&str, f64) -> f64) -> Vec<String> {
     let mut lines = Vec::new();
     let space = measure(" ", size);
-    let mut buf = [0u8; 4];
     // A CRLF pair is one break, a lone CR or LF is one break each.
     for para in text.replace("\r\n", "\n").split(['\n', '\r']) {
         let mut line = String::new();
@@ -127,14 +127,24 @@ pub fn wrap_with(text: &str, size: f64, width: f64, measure: impl Fn(&str, f64) 
                 lines.push(std::mem::take(&mut line));
             }
             line_width = 0.0;
-            for ch in word.chars() {
-                let ch_width = measure(ch.encode_utf8(&mut buf), size);
-                if !line.is_empty() && line_width + ch_width > width {
+            // Broken between characters, but never before a Thai mark: it stays on its letter.
+            let mut start = 0;
+            let mut units = Vec::new();
+            for (i, ch) in word.char_indices().skip(1) {
+                if !shaped_text::joins_previous(ch) {
+                    units.extend(word.get(start..i));
+                    start = i;
+                }
+            }
+            units.extend(word.get(start..).filter(|u| !u.is_empty()));
+            for unit in units {
+                let unit_width = measure(unit, size);
+                if !line.is_empty() && line_width + unit_width > width {
                     lines.push(std::mem::take(&mut line));
                     line_width = 0.0;
                 }
-                line.push(ch);
-                line_width += ch_width;
+                line.push_str(unit);
+                line_width += unit_width;
             }
             fresh = line.is_empty();
         }
@@ -245,26 +255,6 @@ pub fn first_undrawable(s: &str) -> Option<char> {
     s.chars().find(|c| !matches!(c, '\n' | '\r') && !win_ansi_encodable(*c))
 }
 
-/// Whether PdfCraft draws `s` in Inter instead of the standard fonts: they can't draw one of its
-/// characters (Turkish ş, Polish ł, Greek, Cyrillic, …) and Inter, which every build has, can draw
-/// every one of those. Line breaks don't count.
-pub fn needs_inter(s: &str) -> bool {
-    let mut any = false;
-    for c in s.chars().filter(|c| !matches!(c, '\n' | '\r') && !win_ansi_encodable(*c)) {
-        if !inter_has(c) {
-            return false;
-        }
-        any = true;
-    }
-    any
-}
-
-/// [`first_undrawable`] where text the standard fonts can't draw is drawn in Inter instead
-/// ([`needs_inter`]): the first character that would still come out as `?`, or `None`.
-pub fn first_undrawable_inter(s: &str) -> Option<char> {
-    if needs_inter(s) { None } else { first_undrawable(s) }
-}
-
 /// The error for text the standard fonts can't draw ([`first_undrawable`]): which character, in
 /// what (`"the comment"`, `"the reason"`), and what can be written instead. One wording for every
 /// path that writes text in the standard fonts, so agents and users can act on it the same way.
@@ -296,6 +286,16 @@ pub fn set_undrawn_mark(d: &mut pdfcraft_cos::Dict, c: Option<char>) {
             d.remove(UNDRAWN_MARK);
         }
     }
+}
+
+/// The byte used by Unicode text plans, from the shared WinAnsi table (tabs become spaces).
+pub fn win_ansi_char(c: char) -> Option<u8> {
+    if c == '\t' { Some(b' ') } else { win_ansi_byte(c) }
+}
+
+/// Whether every character can be represented without substitution in WinAnsi.
+pub fn fits_win_ansi(s: &str) -> bool {
+    s.chars().all(win_ansi_encodable)
 }
 
 /// Bytes as a PDF literal string, `(` … `)`, with delimiters escaped.
@@ -333,6 +333,15 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_thai_word_keeps_its_marks_on_their_letters() {
+        // Every character one point wide: "น้ำ" (three characters) is one unit, never split.
+        let lines = wrap_with("น้ำปั้นบุญฤทธิ์", 1.0, 2.0, |s, _| s.chars().count() as f64);
+        assert_eq!(lines.concat(), "น้ำปั้นบุญฤทธิ์");
+        assert_eq!(lines, ["น้ำ", "ปั้", "น", "บุ", "ญฤ", "ท", "ธิ์"]);
+        assert!(lines.iter().all(|l| l.chars().next().is_some_and(|c| !shaped_text::joins_previous(c))), "{lines:?}");
+    }
+
+    #[test]
     fn crlf_is_one_line_break() {
         assert_eq!(wrap("a\r\nb", 12.0, 100.0), ["a", "b"]);
         assert_eq!(wrap("a\rb", 12.0, 100.0), ["a", "b"]);
@@ -360,37 +369,6 @@ mod tests {
         assert_eq!(m, "the standard fonts can't draw \"签\" (U+7B7E) in the comment; only Western European characters can be written there for now");
         assert!(undrawable_message("the reason", '\u{7}').contains("\"\\u{7}\" (U+0007)"));
         assert!(undrawable_message("x", '𠀋').contains("(U+2000B)"));
-    }
-
-    /// Text beyond Western European (Turkish, Polish, Czech, Romanian, Greek, Cyrillic) is drawn in
-    /// the bundled Inter instead of as `?`; text Inter can't draw either keeps the old behaviour.
-    #[test]
-    fn inter_draws_what_the_standard_fonts_cannot() {
-        for s in ["Mustafa çokyaşar", "ÇçĞğİıÖöŞşÜü", "Zażółć gęślą jaźń", "Příliš žluťoučký kůň", "Țară și", "Ελληνικά", "Привет, Їжак"]
-        {
-            assert!(needs_inter(s), "{s}");
-            assert_eq!(first_undrawable_inter(s), None, "{s}");
-            for c in s.chars().filter(|c| !win_ansi_encodable(*c)) {
-                assert!(inter_has(c), "{s}: {c}");
-            }
-        }
-        // Western European text stays in the standard fonts.
-        assert!(!needs_inter("Café — 5€\r\n™"));
-        assert_eq!(first_undrawable_inter("Café"), None);
-        // Inter can't draw 中, so the text stays in Helvetica, where ş is the first `?`.
-        assert!(!needs_inter("ş 中"));
-        assert_eq!(first_undrawable_inter("ş 中"), Some('ş'));
-        assert_eq!(first_undrawable_inter("签名"), Some('签'));
-        // A line as paths: curves, closed, at the given place and size.
-        let path = inter_path("ş", 10.0, 5.0, 7.0);
-        assert!(path.contains(" m\n") && path.contains(" c\n") && path.ends_with("h\n"), "{path}");
-        let xs: Vec<f64> = path.lines().filter_map(|l| l.split(' ').next()?.parse().ok()).collect();
-        assert!(xs.iter().all(|x| (5.0..=11.0).contains(x)), "{xs:?}");
-        assert!(inter_path(" \t", 10.0, 0.0, 0.0).is_empty(), "spaces have no outline");
-        // Inter's advances, close to Helvetica's estimate for the same letters.
-        let (inter, helvetica) = (inter_width("Mustafa çokyaşar", 10.0), helvetica_width("Mustafa cokyasar", 10.0));
-        assert!(inter > helvetica * 0.8 && inter < helvetica * 1.3, "{inter} vs {helvetica}");
-        assert_eq!(inter_width("a\tb", 10.0), inter_width("a b", 10.0));
     }
 
     #[test]

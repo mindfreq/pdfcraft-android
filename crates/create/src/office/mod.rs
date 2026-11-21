@@ -200,3 +200,18 @@ pub fn from_office(name: &str, bytes: &[u8]) -> Result<Document, CreateError> {
 
 #[cfg(test)]
 mod tests;
+
+/// File extensions of the Office files [`from_office`] converts on the device.
+pub const OFFICE_EXTENSIONS: [&str; 9] = ["docx", "docm", "dotx", "xlsx", "xlsm", "pptx", "pptm", "ppsx", "rtf"];
+
+/// Whether `bytes` named `name` is an Office file Create converts ([`office_kind`]).
+pub fn is_office(name: &str, bytes: &[u8]) -> bool {
+    office_kind(name, bytes).is_some()
+}
+
+/// Convert an Office file to PDF bytes on the device (the desktop app runs LibreOffice here; a
+/// phone has none, so this is [`from_office`]).
+pub fn office_to_pdf(name: &str, bytes: &[u8]) -> Result<Vec<u8>, crate::CreateError> {
+    let doc = from_office(name, bytes)?;
+    pdfcraft_cos::write_full(&doc, &pdfcraft_cos::SaveOptions::default()).map_err(|e| crate::CreateError::Office(name.to_string(), e.to_string()))
+}
