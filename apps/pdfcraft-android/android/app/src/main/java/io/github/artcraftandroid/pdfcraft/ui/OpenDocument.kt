@@ -56,16 +56,16 @@ class OpenDocument(
     var notWrittenBack = false
 
     /** The links of each page (0-based), refreshed when the document changes. */
-    var links: Map<Int, List<io.github.artcraftandroid.pdfcraft.core.LinkInfo>> = emptyMap()
+    var links by mutableStateOf<Map<Int, List<io.github.artcraftandroid.pdfcraft.core.LinkInfo>>>(emptyMap())
 
     /** The comments, refreshed when the document changes (tapping one selects it). */
-    var comments: List<io.github.artcraftandroid.pdfcraft.core.CommentInfo> = emptyList()
+    var comments by mutableStateOf<List<io.github.artcraftandroid.pdfcraft.core.CommentInfo>>(emptyList())
 
     /** Its signatures and signature fields with what validating them found, refreshed when the document changes. */
     var signatures by mutableStateOf<List<io.github.artcraftandroid.pdfcraft.ui.viewer.SignatureEntry>>(emptyList())
 
     /** The form fields' widgets, refreshed when the document changes. */
-    var widgets: List<io.github.artcraftandroid.pdfcraft.core.WidgetInfo> = emptyList()
+    var widgets by mutableStateOf<List<io.github.artcraftandroid.pdfcraft.core.WidgetInfo>>(emptyList())
 
     /** What the active tool still holds (ink being drawn), to add when the tool is left. */
     var commitTool: (() -> Unit)? = null

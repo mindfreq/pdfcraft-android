@@ -39,6 +39,11 @@ class DocumentFiles(private val context: Context) {
         val name = displayName(uri)
         val dir = File(workDir, sha(uri.toString())).apply { mkdirs() }
         val target = File(dir, name)
+        // The copy made last time is the file again when the source is the same size and has the
+        // same date (the copy keeps it): reopening a large file needn't copy it all over.
+        val srcModified = lastModified(uri)
+        val srcSize = size(uri)
+        if (srcModified != null && srcSize != null && target.isFile && target.length() == srcSize && target.lastModified() == srcModified) return target
         val tmp = File(dir, ".$name.part")
         resolver.openInputStream(uri).use { input ->
             requireNotNull(input) { context.getString(R.string.common_file_unreadable) }
@@ -51,6 +56,14 @@ class DocumentFiles(private val context: Context) {
         // the copy keeps the source's date, which the More sheet shows as when it was modified
         lastModified(uri)?.let { target.setLastModified(it) }
         return target
+    }
+
+    /** The size of [uri] in bytes, when its provider says. */
+    private fun size(uri: Uri): Long? {
+        if (uri.scheme == ContentResolver.SCHEME_FILE) return uri.path?.let { File(it).length() }
+        return runCatching {
+            resolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null }
+        }.getOrNull()
     }
 
     /** When [uri] was last modified (ms), when its provider says: a document's or a media file's date. */

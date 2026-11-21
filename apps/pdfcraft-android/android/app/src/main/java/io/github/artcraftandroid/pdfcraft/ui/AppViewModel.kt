@@ -228,14 +228,24 @@ class AppViewModel(app: Application, private val saved: SavedStateHandle) : Andr
                 recents.list().firstOrNull { it.uri == uri.toString() } to (source == null || files.canWrite(source))
             }
             doc.writable = writable
-            loadLinks(eng, doc)
+            // A tool waiting for this file needs the fields and comments first; otherwise the
+            // page shows at once and the links, fields, comments and signatures load behind it
+            // (one engine call per page would keep a long file off the screen until it finished).
+            if (pendingTool != null) loadLinks(eng, doc)
             doc.controller.nightMode = savedNightMode
             doc.viewer.switchMode(savedPageMode, savedSpread)
             // a file left in Reading Mode reopens in it, unless it was opened for a tool
             readingMode = recent?.reading == true && pendingTool == null
             document = doc
-            if (doc.info.signed) announceSignatures(doc)
-            startPendingTool(doc)
+            if (pendingTool != null) {
+                if (doc.info.signed) announceSignatures(doc)
+                startPendingTool(doc)
+            } else {
+                viewModelScope.launch {
+                    loadLinks(eng, doc)
+                    if (document === doc && doc.info.signed) announceSignatures(doc)
+                }
+            }
             pendingPage = recent?.lastPage?.takeIf { it in 0 until info.pages.size }
             pendingSpot = recent?.takeIf { pendingPage != null && it.lastX >= 0f && it.lastY >= 0f }?.let { Triple(it.lastX, it.lastY, it.lastZoom) }
             withContext(Dispatchers.IO) {
