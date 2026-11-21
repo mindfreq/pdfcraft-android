@@ -58,14 +58,6 @@ class DocumentFiles(private val context: Context) {
         return target
     }
 
-    /** The size of [uri] in bytes, when its provider says. */
-    private fun size(uri: Uri): Long? {
-        if (uri.scheme == ContentResolver.SCHEME_FILE) return uri.path?.let { File(it).length() }
-        return runCatching {
-            resolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null }
-        }.getOrNull()
-    }
-
     /** When [uri] was last modified (ms), when its provider says: a document's or a media file's date. */
     fun lastModified(uri: Uri): Long? {
         if (uri.scheme == ContentResolver.SCHEME_FILE) return uri.path?.let { File(it).lastModified() }?.takeIf { it > 0 }
